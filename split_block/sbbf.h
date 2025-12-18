@@ -1,8 +1,8 @@
 #include <bitset>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <vector>
-
 /*
 Filter hashes "lmao" and "god" into the same block
 filter - 1 0 1 0 1 0 1 0 1
@@ -16,15 +16,17 @@ XOR
 
 class SBBF {
   static constexpr size_t LANES = 4;
-
-  struct Block {
-    std::array<uint64_t, LANES> w{};
-  };
-
+  /*
+    struct Block {
+      std::array<uint64_t, LANES> w{};
+    };
+  */
 public:
   explicit SBBF(int n, double p) {
-    m_ = n * 4;
-    k_ = 3;
+    size_t total_bits =
+        static_cast<size_t>(-n * std::log(p) / (std::log(2) * std::log(2)));
+    m_ = (total_bits + 63) / 64;
+    k_ = 8;
     filter_.resize(m_);
   }
 
@@ -40,12 +42,15 @@ public:
     uint64_t h1 = mix64(h);
     uint64_t h2 = mix64(h1) | 1ULL;
 
-    // size_t block_idx
+    size_t block_idx = h1 % m_;
 
+    uint64_t mask = 0;
     for (size_t i = 0; i < k_; i++) {
-      uint64_t pos = (h1 + i * h2) % m_;
-      filter_[pos >> 6] |= (1ULL << (pos & 63));
+      uint64_t salt = i * 0x9e3779b97f4a7c15ULL;
+      uint64_t bit_pos = mix64(h2 + salt) >> 58;
+      mask |= (1ULL << bit_pos);
     }
+    filter_[block_idx] |= mask;
   }
 
   bool possiblyContains(const std::string &key) {
@@ -53,12 +58,17 @@ public:
     uint64_t h1 = mix64(h);
     uint64_t h2 = mix64(h1) | 1ULL;
 
+    size_t block_idx = h1 % m_;
+
+    uint64_t mask = 0;
     for (size_t i = 0; i < k_; i++) {
-      uint64_t pos = (h1 + i * h2) % m_;
-      if ((filter_[pos >> 6] & (1ULL << (pos & 63))) == 0)
-        return false;
+      uint64_t salt = i * 0x9e3779b97f4a7c15ULL;
+      uint64_t bit_pos = mix64(h2 + salt) >> 58;
+      mask |= (1ULL << bit_pos);
     }
-    return true;
+    if ((filter_[block_idx] & mask) == mask)
+      return true;
+    return false;
   }
 
 private:
@@ -67,6 +77,7 @@ private:
   std::vector<uint64_t> filter_;
 };
 
+/*
 int main() {
   auto sbf = SBBF(10000, .001);
   sbf.insert("hello");
@@ -79,3 +90,4 @@ int main() {
   // long double ans = (1 << 64) / golden_ratio;
   return 0;
 }
+*/
