@@ -39,17 +39,22 @@ public:
     if (m_bits == 0)
       m_bits = 64;
 
-    size_t blocks = (m_bits + 63) / 64;
+    size_t blocks = (m_bits + (LANES * 64 - 1)) / (LANES * 64);
     if (blocks == 0)
       blocks = 1;
 
     m_ = round_up_pow2(blocks);
 
     const double k_f =
-        (static_cast<double>(m_ * 64) / static_cast<double>(n)) * ln2;
-    k_ = std::clamp<std::size_t>(static_cast<std::size_t>(std::lround(k_f)),
-                                 1ULL, 64ULL);
+        (static_cast<double>(m_ * LANES * 64) / static_cast<double>(n)) * ln2;
 
+    size_t kk = static_cast<size_t>(std::lround(k_f));
+    if (kk < 1)
+      kk = 1;
+    const size_t kmax = LANES * 64;
+    if (kk > kmax)
+      kk = kmax;
+    k_ = kk;
     // Allocate filter
     filter_.assign(m_, Block{{0, 0, 0, 0}});
   }
@@ -98,7 +103,7 @@ public:
     return h;
   }
 
-  void insert(const std::string_view &key) {
+  void insert(const std::string_view &key) noexcept {
     uint64_t h = hash64(key);
     uint64_t h1 = mix64(h);
     uint64_t h2 = mix64(h1) | 1ULL;
@@ -109,7 +114,7 @@ public:
     neon_block_or(filter_[idx], mask);
   }
 
-  bool possiblyContains(const std::string_view &key) {
+  bool possiblyContains(const std::string_view &key) const noexcept {
     uint64_t h = hash64(key);
     uint64_t h1 = mix64(h);
     uint64_t h2 = mix64(h1) | 1ULL;
@@ -120,6 +125,7 @@ public:
     return neon_block_contains(filter_[idx], mask);
   }
 
+private:
   Block make_mask_block(uint64_t h1, uint64_t h2) const noexcept {
     Block m{{0, 0, 0, 0}};
     uint64_t x = h1;
@@ -133,7 +139,6 @@ public:
     return m;
   }
 
-private:
   static size_t round_up_pow2(size_t x) noexcept {
     --x;
     x |= x >> 1;
