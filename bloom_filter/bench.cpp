@@ -1,10 +1,10 @@
 #include "sbbf.h"
 #include <benchmark/benchmark.h>
+
 #include <cstdint>
-#include <string>
 #include <vector>
 
-// Fast PRNG (xorshift64*)
+// xorshift64* PRNG
 static inline uint64_t xorshift64star(uint64_t &x) {
   x ^= x >> 12;
   x ^= x << 25;
@@ -12,50 +12,41 @@ static inline uint64_t xorshift64star(uint64_t &x) {
   return x * 2685821657736338717ULL;
 }
 
-// Deterministic "random" string generator without rand().
-// Keep len <= typical SSO threshold to avoid heap churn per string object.
-static std::string make_key(uint64_t v, size_t len = 16) {
-  static constexpr char alphanum[] =
-      "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-  static constexpr size_t A = sizeof(alphanum) - 1;
-
-  std::string s;
-  s.resize(len);
-  for (size_t i = 0; i < len; ++i) {
-    // mix bits a little and map to charset
-    v = (v ^ (v >> 33)) * 0xff51afd7ed558ccdULL;
-    s[i] = alphanum[static_cast<size_t>(v % A)];
+static void shuffle_indices(std::vector<uint32_t> &idx, uint64_t seed) {
+  for (size_t i = idx.size(); i > 1; --i) {
+    const size_t j = static_cast<size_t>(xorshift64star(seed)) % i;
+    std::swap(idx[i - 1], idx[j]);
   }
-  return s;
 }
 
-class SBBF_Fixture : public benchmark::Fixture {
+class BF_Fixture : public benchmark::Fixture {
 public:
-  SBBF<std::string> *filter;
-  std::vector<std::string> keys;
+  SBBF<uint64_t> *filter{nullptr};
+  std::vector<uint64_t> hit_keys;
+  std::vector<uint64_t> miss_keys;
+  std::vector<uint32_t> order;
 
   void SetUp(const ::benchmark::State &state) override {
-    // IMPORTANT: state.range(0) is interpreted as expected inserts "n"
-    // For p=0.01, bits ~= 9.585 * n, bytes ~= 1.198 * n.
-    // So n >= ~107M => >= ~128MB filter. We range from 2^27 (134M) upward.
-    filter = new SBBF<std::string>(static_cast<double>(state.range(0)), 0.01);
+    const size_t n = static_cast<size_t>(state.range(0));
 
-    // Key diversity: choose a big power-of-two count so masking is valid.
-    // 2^20 keys ~ 1,048,576 strings. With SSO (len=16), this is typically tens
-    // of MB.
-    constexpr size_t KEY_COUNT = 1u << 20;
-    keys.clear();
-    keys.reserve(KEY_COUNT);
+    filter = new SBBF<uint64_t>(static_cast<double>(n), 0.01);
 
-    uint64_t seed = 0x123456789abcdef0ULL;
-    for (size_t i = 0; i < KEY_COUNT; ++i) {
-      uint64_t v = xorshift64star(seed);
-      keys.push_back(make_key(v, 16));
+    hit_keys.resize(n);
+    miss_keys.resize(n);
+    order.resize(n);
+
+    uint64_t s1 = 0x123456789abcdef0ULL;
+    uint64_t s2 = 0xfedcba9876543210ULL;
+
+    for (size_t i = 0; i < n; ++i) {
+      hit_keys[i] = xorshift64star(s1);
+      miss_keys[i] = xorshift64star(s2);
+      order[i] = static_cast<uint32_t>(i);
     }
 
-    // Optional but recommended: insert keys so membership queries have
-    // realistic hit behavior. (Also removes “mostly-false” branch bias.)
-    for (const auto &k : keys) {
+    shuffle_indices(order, 0xdeadbeefcafebabeULL);
+
+    for (const uint64_t k : hit_keys) {
       filter->insert(k);
     }
   }
@@ -63,27 +54,53 @@ public:
   void TearDown(const ::benchmark::State &) override { delete filter; }
 };
 
-// Benchmark Query Performance (randomized access; no sequential reuse pattern)
-BENCHMARK_DEFINE_F(SBBF_Fixture, BM_Query)(benchmark::State &state) {
-  // Per-benchmark PRNG state
-  uint64_t rng = 0xdeadbeefcafebabeULL ^ static_cast<uint64_t>(state.range(0));
-  const size_t mask = keys.size() - 1; // keys.size() is power-of-two
+BENCHMARK_DEFINE_F(BF_Fixture, BM_QueryHit)(benchmark::State &state) {
+  constexpr int BATCH = 8;
+
+  size_t pos = 0;
+  uint32_t sink = 0;
 
   for (auto _ : state) {
-    // Randomize queries: no locality / no predictable stepping
-    size_t idx = static_cast<size_t>(xorshift64star(rng)) & mask;
-
-    bool result = filter->possiblyContains(keys[idx]);
-    benchmark::DoNotOptimize(result);
+    for (int j = 0; j < BATCH; ++j) {
+      const uint64_t k = hit_keys[order[pos++]];
+      if (pos == order.size())
+        pos = 0;
+      sink += static_cast<uint32_t>(filter->possiblyContains(k));
+    }
+    benchmark::DoNotOptimize(sink);
   }
 
-  state.SetItemsProcessed(state.iterations());
+  state.SetItemsProcessed(state.iterations() * BATCH);
 }
 
-BENCHMARK_REGISTER_F(SBBF_Fixture, BM_Query)
+BENCHMARK_DEFINE_F(BF_Fixture, BM_QueryMiss)(benchmark::State &state) {
+  constexpr int BATCH = 8;
+
+  size_t pos = 0;
+  uint32_t sink = 0;
+
+  for (auto _ : state) {
+    for (int j = 0; j < BATCH; ++j) {
+      const uint64_t k = miss_keys[order[pos++]];
+      if (pos == order.size())
+        pos = 0;
+      sink += static_cast<uint32_t>(filter->possiblyContains(k));
+    }
+    benchmark::DoNotOptimize(sink);
+  }
+
+  state.SetItemsProcessed(state.iterations() * BATCH);
+}
+
+BENCHMARK_REGISTER_F(BF_Fixture, BM_QueryHit)
     ->RangeMultiplier(2)
-    // Blow past LLC: start at 2^27 expected inserts (~160MB+ at p=0.01)
-    ->Range(1LL << 27, 1LL << 30)
-    ->Complexity();
+    // 2^25 with p=0.01 is ~40MB of bits; exceeds 5800X L3 (32MB).
+    ->Range(1LL << 22, 1LL << 25)
+    ->Unit(benchmark::kNanosecond);
+
+BENCHMARK_REGISTER_F(BF_Fixture, BM_QueryMiss)
+    ->RangeMultiplier(2)
+    ->Range(1LL << 22, 1LL << 25)
+    ->Unit(benchmark::kNanosecond);
 
 BENCHMARK_MAIN();
