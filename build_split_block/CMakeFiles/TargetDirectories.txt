@@ -1,3 +1,0 @@
-/Users/based/Documents/repos/split-block-bloom-filter/build_split_block/CMakeFiles/run_bench.dir
-/Users/based/Documents/repos/split-block-bloom-filter/build_split_block/CMakeFiles/edit_cache.dir
-/Users/based/Documents/repos/split-block-bloom-filter/build_split_block/CMakeFiles/rebuild_cache.dir
