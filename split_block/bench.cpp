@@ -5,6 +5,8 @@
 #include <string_view>
 #include <vector>
 
+static constexpr size_t KEYSET = 1u << 22; // 4M
+
 // xorshift64* PRNG
 static inline uint64_t xorshift64star(uint64_t &x) {
   x ^= x >> 12;
@@ -13,10 +15,15 @@ static inline uint64_t xorshift64star(uint64_t &x) {
   return x * 2685821657736338717ULL;
 }
 
+// convert 64-bit key to std::string_view (treat the 8 bytes of uint64_t as a
+// byte string (length 8)) common microbenchmark trick to avoid allocation and
+// to match an API that accepts bytes
 static inline std::string_view as_view(const uint64_t &x) {
   return std::string_view(reinterpret_cast<const char *>(&x), sizeof(x));
 }
 
+// Fisher-yates shuffle driven by your PRNG
+// Creates a stable "random permutation" of indices
 static void shuffle_indices(std::vector<uint32_t> &idx, uint64_t seed) {
   for (size_t i = idx.size(); i > 1; --i) {
     const size_t j = static_cast<size_t>(xorshift64star(seed)) % i;
